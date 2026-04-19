@@ -36,7 +36,8 @@ import MultitouchSupport
 
     let state = GlobalState.shared
 
-    // Count only fingertip contacts, excluding palm contacts (large majorAxis).
+    // Count only active fingertip contacts, excluding palms (large majorAxis)
+    // and lifting contacts (majorAxis == 0.0).
     let effectiveFingers = TouchHandler.countNonPalmTouches(data: data, nFingers: nFingers)
 
     // Only clear threeDown when all real fingers lift (effectiveFingers == 0).
@@ -57,19 +58,13 @@ import MultitouchSupport
       return
     }
 
-    let isTouchStart = handler.touchStartTime == nil
-    if isTouchStart {
-      handler.touchStartTime = Date()
-      handler.maybeMiddleClick = true
-      handler.middleClickPos1 = .zero
-    } else if handler.maybeMiddleClick, let touchStartTime = handler.touchStartTime {
-      let elapsedTime = -touchStartTime.timeIntervalSinceNow
-      if elapsedTime > maxTimeDelta {
-        handler.maybeMiddleClick = false
-      }
+    guard !(effectiveFingers < fingersQua) else {
+      // Real finger count dropped below threshold while palm remains on pad.
+      // Trigger touch end so the middle click fires without waiting for the
+      // palm to lift (which may never happen during normal use).
+      if handler.touchStartTime != nil { handler.handleTouchEnd() }
+      return
     }
-
-    guard !(effectiveFingers < fingersQua) else { return }
 
     if !allowMoreFingers && effectiveFingers > fingersQua {
       handler.resetMiddleClick()
@@ -78,16 +73,47 @@ import MultitouchSupport
     let isCurrentFingersQuaAllowed = allowMoreFingers ? effectiveFingers >= fingersQua : effectiveFingers == fingersQua
     guard isCurrentFingersQuaAllowed else { return }
 
+    // Start the timer only once qualifying fingers are present, so a resting
+    // palm that arrives before the tap doesn't consume the timeout budget.
+    // Skip processTouches on the first frame: a borderline palm contact may
+    // still be below the threshold and would corrupt the position baseline.
+    let isTouchStart = handler.touchStartTime == nil
+    if isTouchStart {
+      handler.touchStartTime = Date()
+      handler.maybeMiddleClick = true
+      handler.middleClickPos1 = .zero
+      return
+    }
+
+    if handler.maybeMiddleClick, let touchStartTime = handler.touchStartTime {
+      let elapsedTime = -touchStartTime.timeIntervalSinceNow
+      if elapsedTime > maxTimeDelta {
+        handler.maybeMiddleClick = false
+      }
+    }
+
+    // Don't update positions once any contact starts lifting (majorAxis == 0.0).
+    // A lifting contact can be substituted by a different finger in processTouches,
+    // corrupting pos2 and producing a spurious large delta.
+    guard !TouchHandler.hasLiftingContact(data: data, nFingers: nFingers) else { return }
+
     handler.processTouches(data: data, nFingers: nFingers)
 
     return
+  }
+
+  nonisolated private static func hasLiftingContact(data: UnsafePointer<MTTouch>?, nFingers: Int32) -> Bool {
+    guard nFingers > 0, let data = data else { return false }
+    for i in 0..<Int(nFingers) where data[i].majorAxis == 0.0 { return true }
+    return false
   }
 
   nonisolated private static func countNonPalmTouches(data: UnsafePointer<MTTouch>?, nFingers: Int32) -> Int32 {
     guard nFingers > 0, let data = data else { return 0 }
     var count: Int32 = 0
     for i in 0..<Int(nFingers) {
-      if data[i].majorAxis < palmMajorAxisThreshold { count += 1 }
+      let maj = data[i].majorAxis
+      if maj > 0 && maj < palmMajorAxisThreshold { count += 1 }
     }
     return count
   }
@@ -104,7 +130,8 @@ import MultitouchSupport
     var kept = 0
     for i in 0..<Int(nFingers) {
       guard kept < Self.fingersQua else { break }
-      guard data[i].majorAxis < Self.palmMajorAxisThreshold else { continue }
+      let maj = data[i].majorAxis
+      guard maj > 0 && maj < Self.palmMajorAxisThreshold else { continue }
       let pos = SIMD2(data[i].normalizedVector.position)
       if maybeMiddleClick {
         middleClickPos1 += pos
