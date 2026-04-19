@@ -20,6 +20,9 @@ import MultitouchSupport
   private static let allowMoreFingers = config.allowMoreFingers
   private static let maxDistanceDelta = config.maxDistanceDelta
   private static let maxTimeDelta = config.maxTimeDelta
+  // Fingertips are ~7–9mm; palm contacts are ~20–25mm. 15 splits them cleanly.
+  // nonisolated so it is safe to read from the multitouch background thread.
+  nonisolated(unsafe) private static let palmMajorAxisThreshold: Float = 15.0
 
   private var maybeMiddleClick = false
   private var touchStartTime: Date?
@@ -33,43 +36,60 @@ import MultitouchSupport
 
     let state = GlobalState.shared
 
-    state.threeDown =
-    allowMoreFingers ? nFingers >= fingersQua : nFingers == fingersQua
+    // Count only fingertip contacts, excluding palm contacts (large majorAxis).
+    let effectiveFingers = TouchHandler.countNonPalmTouches(data: data, nFingers: nFingers)
+
+    // Only clear threeDown when all real fingers lift (effectiveFingers == 0).
+    // Keeping it set while fingers are partially lifting prevents spurious
+    // 2-finger right-clicks from slipping through the mouse event tap.
+    if effectiveFingers == 0 {
+      state.threeDown = false
+    } else if allowMoreFingers ? effectiveFingers >= fingersQua : effectiveFingers == fingersQua {
+      state.threeDown = true
+    }
 
     let handler = TouchHandler.shared
 
     guard handler.tapToClick else { return }
 
-    guard nFingers != 0 else {
+    guard effectiveFingers != 0 else {
       handler.handleTouchEnd()
       return
     }
 
-    let isTouchStart = nFingers > 0 && handler.touchStartTime == nil
+    let isTouchStart = handler.touchStartTime == nil
     if isTouchStart {
       handler.touchStartTime = Date()
       handler.maybeMiddleClick = true
       handler.middleClickPos1 = .zero
     } else if handler.maybeMiddleClick, let touchStartTime = handler.touchStartTime {
-      // Timeout check for middle click
       let elapsedTime = -touchStartTime.timeIntervalSinceNow
       if elapsedTime > maxTimeDelta {
         handler.maybeMiddleClick = false
       }
     }
 
-    guard !(nFingers < fingersQua) else { return }
+    guard !(effectiveFingers < fingersQua) else { return }
 
-    if !allowMoreFingers && nFingers > fingersQua {
+    if !allowMoreFingers && effectiveFingers > fingersQua {
       handler.resetMiddleClick()
     }
 
-    let isCurrentFingersQuaAllowed = allowMoreFingers ? nFingers >= fingersQua : nFingers == fingersQua
+    let isCurrentFingersQuaAllowed = allowMoreFingers ? effectiveFingers >= fingersQua : effectiveFingers == fingersQua
     guard isCurrentFingersQuaAllowed else { return }
 
     handler.processTouches(data: data, nFingers: nFingers)
 
     return
+  }
+
+  nonisolated private static func countNonPalmTouches(data: UnsafePointer<MTTouch>?, nFingers: Int32) -> Int32 {
+    guard nFingers > 0, let data = data else { return 0 }
+    var count: Int32 = 0
+    for i in 0..<Int(nFingers) {
+      if data[i].majorAxis < palmMajorAxisThreshold { count += 1 }
+    }
+    return count
   }
 
   private func processTouches(data: UnsafePointer<MTTouch>?, nFingers: Int32) {
@@ -81,14 +101,17 @@ import MultitouchSupport
       middleClickPos2 = .zero
     }
 
-//    TODO: Wait, what? Why is this iterating by fingersQua instead of nFingers, given that e.g. "allowMoreFingers" exists?
-    for touch in UnsafeBufferPointer(start: data, count: Self.fingersQua) {
-      let pos = SIMD2(touch.normalizedVector.position)
+    var kept = 0
+    for i in 0..<Int(nFingers) {
+      guard kept < Self.fingersQua else { break }
+      guard data[i].majorAxis < Self.palmMajorAxisThreshold else { continue }
+      let pos = SIMD2(data[i].normalizedVector.position)
       if maybeMiddleClick {
         middleClickPos1 += pos
       } else {
         middleClickPos2 += pos
       }
+      kept += 1
     }
 
     if maybeMiddleClick {
@@ -122,6 +145,7 @@ import MultitouchSupport
       return
     }
     lastEmulatedMiddleClickTime = .init()
+    GlobalState.shared.lastEmulatedClickTime = .init()
 
     // get the current pointer location
     let location = CGEvent(source: nil)?.location ?? .zero

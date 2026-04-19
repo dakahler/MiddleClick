@@ -12,6 +12,14 @@ extension Controller {
     let returnedEvent = Unmanaged.passUnretained(event)
     guard !AppUtils.isIgnoredAppBundle() else { return returnedEvent }
 
+    // Swallow right-clicks that arrive shortly after an emulated middle click.
+    // The spurious right-click from a palm+3-finger lift arrives ~300ms after
+    // the middle click fires, so use a 500ms window to cover timing variance.
+    if type == .rightMouseDown || type == .rightMouseUp,
+       let t = state.lastEmulatedClickTime, -t.timeIntervalSinceNow < 0.5 {
+      return nil
+    }
+
     if state.threeDown && (type == .leftMouseDown || type == .rightMouseDown) {
       state.wasThreeDown = true
       state.threeDown = false
