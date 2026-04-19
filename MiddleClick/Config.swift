@@ -8,7 +8,7 @@ final class Config: ConfigCore {
   @UserDefault("fingers")
   var minimumFingers = 3
 
-  @UserDefault var allowMoreFingers = false
+  @UserDefault var allowMoreFingers = true
 
   @UserDefault var maxDistanceDelta: Float = 0.05
 
